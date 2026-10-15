@@ -113,7 +113,9 @@ workflows:
       - test:
           filters:
             branches:
-              only: main
+              only:
+                - main
+                - /^feature\/.*/
       - build_and_push:
           requires:
             - test
