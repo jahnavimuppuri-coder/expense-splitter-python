@@ -1,3 +1,4 @@
+
 version: 2.1
 
 jobs:
@@ -19,19 +20,47 @@ jobs:
           name: Install dependencies
           command: pip install -r requirements-dev.txt
       - run:
-          name: Wait for PostgreSQL
+          name: Wait for PostgreSQL and Redis
           command: |
-            for i in $(seq 1 30); do
-              pg_isready -h localhost -U expenseuser -d expenses_test && break
-              sleep 2
-            done
+            python - <<'PY'
+            import os
+            import time
+            import psycopg
+            import redis
+
+            for attempt in range(30):
+                try:
+                    with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=2):
+                        pass
+                    redis.Redis.from_url(os.environ["REDIS_URL"]).ping()
+                    print("PostgreSQL and Redis are ready.")
+                    break
+                except Exception as exc:
+                    if attempt == 29:
+                        raise
+                    print(f"Waiting for services: {exc}")
+                    time.sleep(2)
+            PY
       - run:
-          name: Wait for Redis
+          name: Secret scan
           command: |
-            for i in $(seq 1 30); do
-              redis-cli -h localhost ping && break
-              sleep 2
-            done
+            pip install detect-secrets
+            detect-secrets scan --all-files > /tmp/secrets-scan.json
+            python - <<'PY'
+            import json
+            with open("/tmp/secrets-scan.json", encoding="utf-8") as f:
+                report = json.load(f)
+            findings = [
+                (filename, item)
+                for filename, entries in report.get("results", {}).items()
+                for item in entries
+            ]
+            if findings:
+                for filename, item in findings:
+                    print(f"Potential secret: {filename} ({item.get('type')})")
+                raise SystemExit("Secret scan found potential secrets; review them.")
+            print("No potential secrets detected.")
+            PY
       - run:
           name: Apply database migrations
           command: python migrate.py
@@ -53,15 +82,9 @@ jobs:
           command: |
             SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
             case "$CIRCLE_BRANCH" in
-              main)
-                TAG=qa
-                ;;
-              staging)
-                TAG=stage
-                ;;
-              prod)
-                TAG=prod
-                ;;
+              main) TAG=qa ;;
+              staging) TAG=stage ;;
+              prod) TAG=prod ;;
               *)
                 echo "No image publishing for branch $CIRCLE_BRANCH"
                 exit 0
@@ -84,19 +107,30 @@ jobs:
 
 workflows:
   version: 2
-  test_and_build:
+
+  qa_pipeline:
     jobs:
       - test:
           filters:
             branches:
-              only:
-                - main
+              only: main
       - build_and_push:
           requires:
             - test
           filters:
             branches:
-              only:
-                - main
-                - staging
-                - prod
+              only: main
+
+  staging_pipeline:
+    jobs:
+      - build_and_push:
+          filters:
+            branches:
+              only: staging
+
+  production_pipeline:
+    jobs:
+      - build_and_push:
+          filters:
+            branches:
+              only: prod
