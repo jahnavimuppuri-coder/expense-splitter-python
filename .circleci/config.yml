@@ -66,11 +66,9 @@ jobs:
             import json
             import sys
 
-            with open("/tmp/secrets-scan.json", encoding="utf-8") as f:
-                report = json.load(f)
+            with open("/tmp/secrets-scan.json", encoding="utf-8") as file:
+                report = json.load(file)
 
-            # These files contain local/test credentials only.
-            # Never store real secrets in these files.
             allowed_files = {
                 ".circleci/config.yml",
                 "docker-compose.yml",
@@ -115,6 +113,7 @@ jobs:
 
     steps:
       - checkout
+
       - setup_remote_docker
 
       - run:
@@ -142,7 +141,7 @@ jobs:
             echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
 
       - run:
-          name: Log in to Docker Hub
+          name: Diagnose and log in to Docker Hub
           command: |
             if [ -z "${DOCKERHUB_USER:-}" ]; then
               echo "ERROR: DOCKERHUB_USER is missing or empty."
@@ -155,6 +154,8 @@ jobs:
             fi
 
             echo "Docker Hub username variable is present."
+            echo "Username length: ${#DOCKERHUB_USER}"
+            echo "Token variable is present."
 
             printf '%s' "$DOCKERHUB_TOKEN" | docker login \
               --username "$DOCKERHUB_USER" \
