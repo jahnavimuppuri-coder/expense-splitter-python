@@ -1,0 +1,102 @@
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12
+      - image: cimg/postgres:16.0
+        environment:
+          POSTGRES_DB: expenses_test
+          POSTGRES_USER: expenseuser
+          POSTGRES_PASSWORD: expensepass
+      - image: cimg/redis:7.0
+    environment:
+      DATABASE_URL: postgresql://expenseuser:expensepass@localhost:5432/expenses_test
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Wait for PostgreSQL
+          command: |
+            for i in $(seq 1 30); do
+              pg_isready -h localhost -U expenseuser -d expenses_test && break
+              sleep 2
+            done
+      - run:
+          name: Wait for Redis
+          command: |
+            for i in $(seq 1 30); do
+              redis-cli -h localhost ping && break
+              sleep 2
+            done
+      - run:
+          name: Apply database migrations
+          command: python migrate.py
+      - run:
+          name: Lint
+          command: python -m ruff check app tests
+      - run:
+          name: Unit and API integration tests
+          command: python -m pytest -v
+
+  build_and_push:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Set image tags
+          command: |
+            SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+            case "$CIRCLE_BRANCH" in
+              main)
+                TAG=qa
+                ;;
+              staging)
+                TAG=stage
+                ;;
+              prod)
+                TAG=prod
+                ;;
+              *)
+                echo "No image publishing for branch $CIRCLE_BRANCH"
+                exit 0
+                ;;
+            esac
+            echo "export IMAGE_TAG=$TAG" >> "$BASH_ENV"
+            echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
+      - run:
+          name: Log in to Docker Hub
+          command: |
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+      - run:
+          name: Build and push image tags
+          command: |
+            source "$BASH_ENV"
+            IMAGE="$DOCKERHUB_USER/expense-splitter-python"
+            docker build -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA" .
+            docker push "$IMAGE:$IMAGE_TAG"
+            docker push "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA"
+
+workflows:
+  version: 2
+  test_and_build:
+    jobs:
+      - test:
+          filters:
+            branches:
+              only:
+                - main
+      - build_and_push:
+          requires:
+            - test
+          filters:
+            branches:
+              only:
+                - main
+                - staging
+                - prod
