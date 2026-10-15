@@ -26,21 +26,75 @@ jobs:
       - run:
           name: Wait for PostgreSQL and Redis
           command: |
-            python -c "import os,time,psycopg,redis; \
-            [((psycopg.connect(os.environ['DATABASE_URL']).close()), \
-            redis.Redis.from_url(os.environ['REDIS_URL']).ping()) \
-            for _ in range(1)]"
-            python -c "import os,time,psycopg,redis; \
-            for_attempt = 0"
-            python -c "import os,time,psycopg,redis; \
-            exec('for attempt in range(30):\n try:\n  with psycopg.connect(os.environ[\"DATABASE_URL\"], connect_timeout=2): pass\n  redis.Redis.from_url(os.environ[\"REDIS_URL\"]).ping()\n  print(\"Services ready\")\n  break\n except Exception:\n  if attempt == 29: raise\n  time.sleep(2)')"
+            python - \<<'PY'
+            import os
+            import time
+            import psycopg
+            import redis
+
+            for attempt in range(30):
+                try:
+                    with psycopg.connect(
+                        os.environ["DATABASE_URL"],
+                        connect_timeout=2
+                    ):
+                        pass
+
+                    redis.Redis.from_url(
+                        os.environ["REDIS_URL"],
+                        socket_connect_timeout=2
+                    ).ping()
+
+                    print("PostgreSQL and Redis are ready.")
+                    break
+
+                except Exception as exc:
+                    if attempt == 29:
+                        raise
+
+                    print("Waiting for services: {}".format(exc))
+                    time.sleep(2)
+            PY
 
       - run:
           name: Secret scan
           command: |
             pip install detect-secrets
             detect-secrets scan --all-files > /tmp/secrets-scan.json
-            python -c "import json; r=json.load(open('/tmp/secrets-scan.json', encoding='utf-8')); allowed={'.circleci/config.yml','docker-compose.yml'}; findings=[(f,x) for f,items in r.get('results',{}).items() for x in items if f not in allowed]; [print('Potential secret:',f,x.get('type')) for f,x in findings]; raise SystemExit('Secret scan failed; review findings.') if findings else print('No findings outside reviewed local/test configuration files.')"
+
+            python - \<<'PY'
+            import json
+            import sys
+
+            with open("/tmp/secrets-scan.json", encoding="utf-8") as f:
+                report = json.load(f)
+
+            # These files contain only local/test database credentials.
+            # Never put real credentials or access tokens in these files.
+            allowed_files = {
+                ".circleci/config.yml",
+                "docker-compose.yml",
+            }
+
+            findings = [
+                (filename, item)
+                for filename, entries in report.get("results", {}).items()
+                for item in entries
+                if filename not in allowed_files
+            ]
+
+            if findings:
+                for filename, item in findings:
+                    print(
+                        "Potential secret: {} ({})".format(
+                            filename,
+                            item.get("type")
+                        )
+                    )
+                sys.exit("Secret scan failed. Review the findings.")
+
+            print("No findings outside reviewed local/test configuration files.")
+            PY
 
       - run:
           name: Apply database migrations
@@ -66,29 +120,45 @@ jobs:
           name: Set image tags
           command: |
             SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+
             case "$CIRCLE_BRANCH" in
-              main) TAG=qa ;;
-              staging) TAG=stage ;;
-              prod) TAG=prod ;;
+              main)
+                TAG=qa
+                ;;
+              staging)
+                TAG=stage
+                ;;
+              prod)
+                TAG=prod
+                ;;
               *)
                 echo "No image publishing for branch $CIRCLE_BRANCH"
                 exit 0
                 ;;
             esac
+
             echo "export IMAGE_TAG=$TAG" >> "$BASH_ENV"
             echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
 
       - run:
           name: Log in to Docker Hub
           command: |
-            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+            echo "$DOCKERHUB_TOKEN" | docker login \
+              -u "$DOCKERHUB_USER" \
+              --password-stdin
 
       - run:
           name: Build and push image tags
           command: |
             source "$BASH_ENV"
+
             IMAGE="$DOCKERHUB_USER/expense-splitter-python"
-            docker build -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA" .
+
+            docker build \
+              -t "$IMAGE:$IMAGE_TAG" \
+              -t "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA" \
+              .
+
             docker push "$IMAGE:$IMAGE_TAG"
             docker push "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA"
 
