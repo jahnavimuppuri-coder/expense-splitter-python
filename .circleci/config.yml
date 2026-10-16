@@ -1,0 +1,209 @@
+
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12
+      - image: cimg/postgres:16.0
+        environment:
+          POSTGRES_DB: expenses_test
+          POSTGRES_USER: expenseuser
+          POSTGRES_PASSWORD: expensepass
+      - image: cimg/redis:7.0
+
+    environment:
+      DATABASE_URL: postgresql://expenseuser:expensepass@localhost:5432/expenses_test
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install dependencies
+          command: pip install -r requirements-dev.txt
+
+      - run:
+          name: Wait for PostgreSQL and Redis
+          command: |
+            python - \<<'PY'
+            import os
+            import time
+            import psycopg
+            import redis
+
+            for attempt in range(30):
+                try:
+                    with psycopg.connect(
+                        os.environ["DATABASE_URL"],
+                        connect_timeout=2
+                    ):
+                        pass
+
+                    redis.Redis.from_url(
+                        os.environ["REDIS_URL"],
+                        socket_connect_timeout=2
+                    ).ping()
+
+                    print("PostgreSQL and Redis are ready.")
+                    break
+
+                except Exception as exc:
+                    if attempt == 29:
+                        raise
+
+                    print("Waiting for services: {}".format(exc))
+                    time.sleep(2)
+            PY
+
+      - run:
+          name: Secret scan
+          command: |
+            pip install detect-secrets
+            detect-secrets scan --all-files > /tmp/secrets-scan.json
+
+            python - \<<'PY'
+            import json
+            import sys
+
+            with open("/tmp/secrets-scan.json", encoding="utf-8") as file:
+                report = json.load(file)
+
+            allowed_files = {
+                ".circleci/config.yml",
+                "docker-compose.yml",
+            }
+
+            findings = [
+                (filename, item)
+                for filename, entries in report.get("results", {}).items()
+                for item in entries
+                if filename not in allowed_files
+            ]
+
+            if findings:
+                for filename, item in findings:
+                    print(
+                        "Potential secret: {} ({})".format(
+                            filename,
+                            item.get("type")
+                        )
+                    )
+
+                sys.exit("Secret scan failed. Review the findings.")
+
+            print("No findings outside reviewed local/test configuration files.")
+            PY
+
+      - run:
+          name: Apply database migrations
+          command: python migrate.py
+
+      - run:
+          name: Lint
+          command: python -m ruff check app tests
+
+      - run:
+          name: Unit and API integration tests
+          command: python -m pytest -v
+
+  build_and_push:
+    docker:
+      - image: cimg/base:current
+
+    steps:
+      - checkout
+
+      - setup_remote_docker
+
+      - run:
+          name: Set image tags
+          command: |
+            SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+
+            case "$CIRCLE_BRANCH" in
+              main)
+                TAG=qa
+                ;;
+              staging)
+                TAG=stage
+                ;;
+              prod)
+                TAG=prod
+                ;;
+              *)
+                echo "No image publishing for branch $CIRCLE_BRANCH"
+                exit 0
+                ;;
+            esac
+
+            echo "export IMAGE_TAG=$TAG" >> "$BASH_ENV"
+            echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
+
+      - run:
+          name: Diagnose and log in to Docker Hub
+          command: |
+            if [ -z "${DOCKERHUB_USER:-}" ]; then
+              echo "ERROR: DOCKERHUB_USER is missing or empty."
+              exit 1
+            fi
+
+            if [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "ERROR: DOCKERHUB_TOKEN is missing or empty."
+              exit 1
+            fi
+
+            echo "Docker Hub username variable is present."
+            echo "Username length: ${#DOCKERHUB_USER}"
+            echo "Token variable is present."
+
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USER" \
+              --password-stdin
+
+      - run:
+          name: Build and push image tags
+          command: |
+            source "$BASH_ENV"
+
+            IMAGE="$DOCKERHUB_USER/expense-splitter-python"
+
+            docker build \
+              -t "$IMAGE:$IMAGE_TAG" \
+              -t "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA" \
+              .
+
+            docker push "$IMAGE:$IMAGE_TAG"
+            docker push "$IMAGE:$CIRCLE_BRANCH-$SHORT_SHA"
+
+workflows:
+  qa_pipeline:
+    jobs:
+      - test:
+          filters:
+            branches:
+              only:
+                - main
+                - /^feature\/.*/
+
+      - build_and_push:
+          requires:
+            - test
+          filters:
+            branches:
+              only: main
+
+  staging_pipeline:
+    jobs:
+      - build_and_push:
+          filters:
+            branches:
+              only: staging
+
+  production_pipeline:
+    jobs:
+      - build_and_push:
+          filters:
+            branches:
+              only: prod
+

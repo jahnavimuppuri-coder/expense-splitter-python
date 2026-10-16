@@ -1,0 +1,26 @@
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: expense-migrate
+  namespace: stage
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: dockerhub-secret
+      containers:
+        - name: migrate
+          image: jahnavigayathri/expense-splitter-python:stage
+          imagePullPolicy: Always
+          command: ["python", "migrate.py"]
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: expense-db-secret
+                  key: password
+            - name: DATABASE_URL
+              value: "postgresql://expenseuser:$(DB_PASSWORD)@postgres:5432/expenses"
