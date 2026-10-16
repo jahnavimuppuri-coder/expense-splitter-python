@@ -11,3 +11,5 @@ test-results/
 gitleaks.json
 .env
 .DS_Store
+
+qa-backup.sql
