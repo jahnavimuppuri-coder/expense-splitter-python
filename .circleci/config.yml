@@ -66,11 +66,9 @@ jobs:
             import json
             import sys
 
-            with open("/tmp/secrets-scan.json", encoding="utf-8") as f:
-                report = json.load(f)
+            with open("/tmp/secrets-scan.json", encoding="utf-8") as file:
+                report = json.load(file)
 
-            # These files contain only local/test database credentials.
-            # Never put real credentials or access tokens in these files.
             allowed_files = {
                 ".circleci/config.yml",
                 "docker-compose.yml",
@@ -91,6 +89,7 @@ jobs:
                             item.get("type")
                         )
                     )
+
                 sys.exit("Secret scan failed. Review the findings.")
 
             print("No findings outside reviewed local/test configuration files.")
@@ -114,6 +113,7 @@ jobs:
 
     steps:
       - checkout
+
       - setup_remote_docker
 
       - run:
@@ -141,10 +141,24 @@ jobs:
             echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
 
       - run:
-          name: Log in to Docker Hub
+          name: Diagnose and log in to Docker Hub
           command: |
-            echo "$DOCKERHUB_TOKEN" | docker login \
-              -u "$DOCKERHUB_USER" \
+            if [ -z "${DOCKERHUB_USER:-}" ]; then
+              echo "ERROR: DOCKERHUB_USER is missing or empty."
+              exit 1
+            fi
+
+            if [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "ERROR: DOCKERHUB_TOKEN is missing or empty."
+              exit 1
+            fi
+
+            echo "Docker Hub username variable is present."
+            echo "Username length: ${#DOCKERHUB_USER}"
+            echo "Token variable is present."
+
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USER" \
               --password-stdin
 
       - run:
@@ -192,3 +206,4 @@ workflows:
           filters:
             branches:
               only: prod
+
